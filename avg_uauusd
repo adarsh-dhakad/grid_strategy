@@ -1,0 +1,153 @@
+//+------------------------------------------------------------------+
+//|                                       OptimizedGridBot_v4.mq5    |
+//|                               Copyright 2026, Smart Engineer     |
+//+------------------------------------------------------------------+
+#property copyright "Smart Engineer"
+#property version   "4.00"
+#include <Trade\Trade.mqh>
+
+//--- INPUTS
+input double   InitialLot     = 0.05;      // First Trade Lot Size
+input double   LotStep        = 0.02;      // Add this amount (Arithmetic: 0.01, 0.02, 0.03...)
+input int      GridStepPoints = 5000;      // Drop in Points ($10 Drop)
+input double   ProfitBuffer   = 5.00;      // Extra profit ($) to secure above the Center
+input int      MaxOrders      = 200;        // Max trades allowed
+
+//--- GLOBALS
+CTrade trade;
+int magicNumber = 999888;
+
+int OnInit()
+  {
+   trade.SetExpertMagicNumber(magicNumber);
+   return(INIT_SUCCEEDED);
+  }
+
+void OnTick()
+  {
+   // --- 1. DECLARE VARIABLES TO HOLD DATA ---
+   double minPrice = 999999;  // Will store the Lowest Buy Price
+   double maxPrice = 0;       // Will store the Highest Buy Price
+   int    buyCount = 0;       // Will store Number of Trades
+   double totalPnL = 0;       // Will store Total Profit
+
+   // --- 2. RUN THE "ALL-IN-ONE" CALCULATOR ---
+   // We pass the variables by reference (&), so the function fills them up!
+   CalculateAllStats(minPrice, maxPrice, buyCount, totalPnL);
+
+   // --- 3. CHECK EXIT LOGIC (Center + Profit) ---
+   if(buyCount > 0)
+     {
+      // The Center is the average of your First Buy (Max) and Last Buy (Min)
+      double centerPrice = (maxPrice + minPrice) / 2;
+      double currentBid  = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+
+      // EXIT RULE: Price is above Center AND we have enough profit
+      if(currentBid >= centerPrice && totalPnL >= ProfitBuffer)
+        {
+         CloseAllTrades();
+         return; // Done for this tick
+        }
+     }
+
+   // --- 4. CHECK ENTRY LOGIC ---
+   
+   // A. FIRST TRADE (If no trades open)
+   if(buyCount == 0)
+     {
+      trade.Buy(InitialLot, Symbol(), 0, 0, 0, "First Trade");
+     }
+   
+   // B. GRID TRADE (If price dropped)
+  // B. GRID TRADE (If price dropped)
+   else
+     {
+      // 1. Get Values
+      double lastOpenPrice = minPrice; 
+      double currentAsk    = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+      double pointVal      = SymbolInfoDouble(Symbol(), SYMBOL_POINT); // Use this instead of _Point
+      double dropSize      = GridStepPoints * pointVal;
+      double targetPrice   = lastOpenPrice - dropSize;
+
+      // 2. DEBUG PRINT (This is the solution)
+      // This will print every tick so you can SEE the math in the Journal
+      // Remove this line after it works to stop spamming
+      Print("Lowest Buy: ", lastOpenPrice, " | Current Ask: ", currentAsk, " | Target to Buy: ", targetPrice);
+
+      // 3. LOGIC CONDITION
+      if(currentAsk <= targetPrice && buyCount < MaxOrders)
+        {
+         // 4. LOT SIZE CALCULATION
+         double nextLot = InitialLot + (buyCount * LotStep);
+         nextLot = NormalizeDouble(nextLot, 2);
+
+         // 5. CHECK FOR MINIMUM LOT (Safety)
+         double minLot = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
+         if(nextLot < minLot) nextLot = minLot;
+
+         // 6. EXECUTE TRADE
+         if(trade.Buy(nextLot, Symbol(), 0, 0, 0, "Grid Step " + IntegerToString(buyCount + 1)))
+           {
+            Print("SUCCESS! Opened Grid Step ", buyCount + 1, " at ", currentAsk);
+           }
+         else
+           {
+            Print("ERROR! Failed to open trade. Error Code: ", GetLastError());
+           }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//| HELPER FUNCTIONS (Optimized)                                     |
+//+------------------------------------------------------------------+
+
+// THE SUPER FUNCTION: Calculates EVERYTHING in 1 Loop
+void CalculateAllStats(double &min, double &max, int &count, double &profit)
+  {
+   // Reset variables inside the function just to be safe
+   min = 999999;
+   max = 0;
+   count = 0;
+   profit = 0;
+
+   // The Single Loop
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetSymbol(i) == Symbol() && PositionGetInteger(POSITION_MAGIC) == magicNumber)
+        {
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+           {
+            // 1. Get Price Info
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            
+            // 2. Update Max/Min
+            if(openPrice < min) min = openPrice; // Found a new lowest
+            if(openPrice > max) max = openPrice; // Found a new highest
+            
+            // 3. Update Count
+            count++;
+            
+            // 4. Update Profit (Profit + Swap + Commission)
+            profit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_SWAP) + PositionGetDouble(POSITION_COMMISSION);
+           }
+        }
+     }
+  }
+
+// Standard Close All Function
+void CloseAllTrades()
+  {
+   Print("Target Hit! Closing ALL trades...");
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+        {
+         if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == magicNumber)
+           {
+            trade.PositionClose(ticket);
+           }
+        }
+     }
+  }
