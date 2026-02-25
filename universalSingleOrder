@@ -1,0 +1,197 @@
+//+------------------------------------------------------------------+
+//|                                              GoldMinuteScalp.mq5 |
+//|                                  Copyright 2026, Adarsh          |
+//+------------------------------------------------------------------+
+#property strict
+#include <Trade\Trade.mqh>
+
+input int      Magic        = 77777;   // Unique ID for this bot
+input double   LotSize      = 0.05;
+input double      DistancePoints = 2;    // 2.00 USD (Check your broker decimal)
+input int      TakeProfit   = 5;      // TakeProfit
+input int      StopLoss     = 3;      // StopLoss
+input int      TriggerTrail = 1;      // TriggerTrail
+input int ADXPeriod = 14;
+input int ADXThreshold = 25;
+input ENUM_TIMEFRAMES TF  = PERIOD_M1;
+
+int adxHandle;
+CTrade         trade;
+datetime       lastMinute;
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnInit()
+  {
+   trade.SetExpertMagicNumber(Magic);
+   adxHandle = iADX(_Symbol, TF, ADXPeriod);
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void OnTick()
+  {
+   datetime currentMinute = iTime(_Symbol, PERIOD_M1, 0);
+
+// 1. Minute Reset: If no trade is active, reset the trap
+   if(currentMinute != lastMinute)
+     {
+      lastMinute = currentMinute;
+      if(!HasOpenPosition())
+        {
+         CancelPendingOrders();
+         /*
+         double adx[];
+         ArraySetAsSeries(adx, true);
+         if(CopyBuffer(adxHandle, 0, 0, 1, adx) > 0)
+           {
+            double currentADX = adx[0];
+            if(currentADX > ADXThreshold)
+              {
+               PlaceOrders();
+              }
+           }
+           */
+         double adx_main[], plus_di[], minus_di[];
+         ArraySetAsSeries(adx_main, true);
+         ArraySetAsSeries(plus_di, true);
+         ArraySetAsSeries(minus_di, true);
+
+         // Buffer 0 = ADX Main, Buffer 1 = +DI (Buy Signal), Buffer 2 = -DI (Sell Signal)
+         if(CopyBuffer(adxHandle, 0, 0, 1, adx_main) > 0 &&
+            CopyBuffer(adxHandle, 1, 0, 1, plus_di) > 0 &&
+            CopyBuffer(adxHandle, 2, 0, 1, minus_di) > 0)
+           {
+            if(adx_main[0] > ADXThreshold)
+              {
+               // Pass the signals to the placement function
+               PlaceFilteredOrders(plus_di[0], minus_di[0]);
+              }
+           }
+        }
+     }
+
+// 2. OCO Logic: If an order just executed, kill the other pending one
+   if(HasOpenPosition())
+     {
+      CancelPendingOrders();
+     }
+
+// 3. Trailing Logic
+   ManageTrailingStop();
+  }
+
+// Check if THIS bot has an active position
+bool HasOpenPosition()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetSymbol(i) == _Symbol && PositionGetInteger(POSITION_MAGIC) == Magic)
+         return true;
+     }
+   return false;
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void PlaceOrders()
+  {
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   double buyEntry =  NormalizeDouble(ask + DistancePoints, _Digits);
+   double buySL    =  NormalizeDouble(buyEntry - StopLoss, _Digits);
+   double buyTP    =  NormalizeDouble(buyEntry + TakeProfit, _Digits);
+
+   double sellEntry =   NormalizeDouble(bid - DistancePoints, _Digits);
+   double sellSL    =   NormalizeDouble(sellEntry + StopLoss, _Digits);
+   double sellTP    =   NormalizeDouble(sellEntry - TakeProfit, _Digits);
+
+
+   trade.BuyStop(LotSize, buyEntry, _Symbol, buySL, buyTP);
+   trade.SellStop(LotSize, sellEntry, _Symbol, sellSL, sellTP);
+  }
+  
+  // Logic: Only place the specific order if its signal is > 10
+void PlaceFilteredOrders(double buySignal, double sellSignal)
+{
+   double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
+   double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+
+   // BUY ORDER FILTER
+   if(buySignal > 30 && sellSignal < 10)
+   {
+      double buyEntry = NormalizeDouble(ask + DistancePoints, _Digits);
+      double buySL    = NormalizeDouble(buyEntry - StopLoss, _Digits);
+      double buyTP    = NormalizeDouble(buyEntry + TakeProfit, _Digits);
+      trade.BuyStop(LotSize, buyEntry, _Symbol, buySL, buyTP);
+   }
+
+   // SELL ORDER FILTER
+   if(sellSignal > 30 && buySignal < 10)
+   {
+      double sellEntry = NormalizeDouble(bid - DistancePoints, _Digits);
+      double sellSL    = NormalizeDouble(sellEntry + StopLoss, _Digits);
+      double sellTP    = NormalizeDouble(sellEntry - TakeProfit, _Digits);
+      trade.SellStop(LotSize, sellEntry, _Symbol, sellSL, sellTP);
+   }
+}
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void ManageTrailingStop()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket) && PositionGetInteger(POSITION_MAGIC) == Magic)
+        {
+         double entryPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+         double currentPrice = PositionGetDouble(POSITION_PRICE_CURRENT);
+         double currentSL = PositionGetDouble(POSITION_SL);
+         double point = _Point;
+
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+           {
+            // If current price is 1.00 USD above entry
+            if(currentPrice >= entryPrice + TriggerTrail)
+              {
+               // MOVE SL UP to entry + 0.50 (or whatever lock you want)
+               double newSL = currentPrice - TriggerTrail;
+               if(currentSL < newSL)
+                  trade.PositionModify(ticket, NormalizeDouble(newSL, _Digits), PositionGetDouble(POSITION_TP));
+              }
+           }
+         else
+            if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_SELL)
+              {
+               // If current price is 1.00 USD below entry
+               if(currentPrice <= entryPrice - TriggerTrail)
+                 {
+                  // MOVE SL DOWN to entry - 0.50
+                  double newSL = currentPrice + TriggerTrail;
+                  if(currentSL > newSL || currentSL == 0)
+                     trade.PositionModify(ticket, NormalizeDouble(newSL, _Digits), PositionGetDouble(POSITION_TP));
+                 }
+              }
+        }
+     }
+  }
+
+//+------------------------------------------------------------------+
+//|                                                                  |
+//+------------------------------------------------------------------+
+void CancelPendingOrders()
+  {
+   for(int i = OrdersTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = OrderGetTicket(i);
+      if(OrderSelect(ticket) && OrderGetInteger(ORDER_MAGIC) == Magic)
+         trade.OrderDelete(ticket);
+     }
+  }
+//+------------------------------------------------------------------+
