@@ -1,0 +1,140 @@
+//+------------------------------------------------------------------+
+//|                                         OptimizedGridBot_v5.mq5  |
+//|                               Copyright 2026, Smart Engineer     |
+//+------------------------------------------------------------------+
+#property copyright "Smart Engineer"
+#property version   "5.00"
+#include <Trade\Trade.mqh>
+
+//--- INPUTS
+input double   InitialLot     = 0.01;      
+input double   LotStep        = 0.01;      
+input double   GridStepUSD    = 10.00;     
+input double   ProfitBuffer   = 1;      
+input int      MaxOrders      = 200;       
+input double   MaxGVZ         = 90.0;      // Volatility Threshold
+
+//--- GLOBALS
+CTrade trade;
+int magicNumber = 999888;
+
+int OnInit()
+  {
+   trade.SetExpertMagicNumber(magicNumber);
+   return(INIT_SUCCEEDED);
+  }
+
+void OnTick()
+  {
+   double minPrice = 999999;  
+   double maxPrice = 0;       
+   int    buyCount = 0;       
+   double totalPnL = 0;       
+
+   CalculateAllStats(minPrice, maxPrice, buyCount, totalPnL);
+
+   // --- 1. EXIT LOGIC (Always checked) ---
+   if(buyCount > 0)
+     {
+      double centerPrice = (maxPrice + minPrice) / 2;
+      double currentBid  = SymbolInfoDouble(Symbol(), SYMBOL_BID);
+
+      if(currentBid >= centerPrice && totalPnL >= ProfitBuffer + buyCount)
+        {
+         CloseAllTrades();
+         return; 
+        }
+     }
+
+   // --- 2. ENTRY LOGIC ---
+   
+   // A. FIRST TRADE: Check GVZ only here
+   if(buyCount == 0)
+     {
+      double currentGVZ = GetSyntheticGVZ();
+      
+      if(currentGVZ <= MaxGVZ) 
+        {
+         trade.Buy(InitialLot, Symbol(), 0, 0, 0, "First Trade (GVZ: " + DoubleToString(currentGVZ, 2) + ")");
+        }
+      else 
+        {
+         // Optional: Print why we aren't starting
+         static datetime lastPrint = 0;
+         if(TimeCurrent() - lastPrint > 3600) { // Log once per hour
+            Print("Grid Idle: GVZ is too high (", currentGVZ, "). Waiting for calmer markets.");
+            lastPrint = TimeCurrent();
+         }
+        }
+     }
+   
+   // B. GRID TRADE: No GVZ check here as per your request
+   else
+     {
+      double lastOpenPrice = minPrice; 
+      double currentAsk    = SymbolInfoDouble(Symbol(), SYMBOL_ASK);
+      double targetPrice   = lastOpenPrice - GridStepUSD;
+
+      if(currentAsk <= targetPrice + 0.01 && buyCount < MaxOrders)
+        {
+         double nextLot = InitialLot + (buyCount * LotStep);
+         nextLot = NormalizeDouble(nextLot, 2);
+
+         double minLot = SymbolInfoDouble(Symbol(), SYMBOL_VOLUME_MIN);
+         if(nextLot < minLot) nextLot = minLot;
+
+         trade.Buy(nextLot, Symbol(), 0, 0, 0, "Grid Step " + IntegerToString(buyCount + 1));
+        }
+     }
+  }
+
+double GetSyntheticGVZ() {
+   int stdHandle = iStdDev(_Symbol, PERIOD_H1, 100, 0, MODE_SMA, PRICE_CLOSE);
+   double buf[];
+   ArraySetAsSeries(buf, true);
+   
+   if(CopyBuffer(stdHandle, 0, 0, 1, buf) <= 0) {
+      IndicatorRelease(stdHandle);
+      return 0;
+   }
+   IndicatorRelease(stdHandle);
+
+   double price = SymbolInfoDouble(_Symbol, SYMBOL_BID);
+   if(price <= 0) return 0;
+
+   // CALIBRATION: (Standard Deviation / Price) * Multiplier
+   // This tracks the percentage of "stretch" in the price
+   double volatility = (buf[0] / price) * 5000.0; 
+   
+   return volatility; 
+}
+
+void CalculateAllStats(double &min, double &max, int &count, double &profit)
+  {
+   min = 999999; max = 0; count = 0; profit = 0;
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      if(PositionGetSymbol(i) == Symbol() && PositionGetInteger(POSITION_MAGIC) == magicNumber)
+        {
+         if(PositionGetInteger(POSITION_TYPE) == POSITION_TYPE_BUY)
+           {
+            double openPrice = PositionGetDouble(POSITION_PRICE_OPEN);
+            if(openPrice < min) min = openPrice; 
+            if(openPrice > max) max = openPrice; 
+            count++;
+            profit += PositionGetDouble(POSITION_PROFIT) + PositionGetDouble(POSITION_COMMISSION);
+           }
+        }
+     }
+  }
+
+void CloseAllTrades()
+  {
+   for(int i = PositionsTotal() - 1; i >= 0; i--)
+     {
+      ulong ticket = PositionGetTicket(i);
+      if(PositionSelectByTicket(ticket))
+         if(PositionGetString(POSITION_SYMBOL) == Symbol() && PositionGetInteger(POSITION_MAGIC) == magicNumber)
+            trade.PositionClose(ticket);
+     }
+  }
